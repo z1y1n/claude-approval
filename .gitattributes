@@ -1,0 +1,11 @@
+# 仓库内统一存 LF，检出时按类型决定换行符
+* text=auto eol=lf
+
+# cmd.exe 对纯 LF 的批处理容错差，必须回退成 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+*.ico binary
+*.jpg binary
+*.png binary

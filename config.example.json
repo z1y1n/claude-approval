@@ -1,0 +1,26 @@
+{
+  "waitTimeoutSec": 300,
+  "pollIntervalSec": 3,
+  "cacheTtlMin": 10,
+  "exemptTools": [
+    "Read",
+    "Glob",
+    "Grep",
+    "TodoWrite",
+    "Task",
+    "Skill",
+    "ListMcpResources",
+    "ReadMcpResource",
+    "AskUserQuestion",
+    "NotebookRead"
+  ],
+  "userOpenId": "",
+  "chatId": "",
+  "maxToolInputChars": 600,
+  "maxMsgChars": 1200,
+  "maxReplyTextChars": 200,
+  "stalePendingSec": 3600,
+  "idAlphabet": "abcdefghjkmnpqrstuvwxyz",
+  "nodePath": "",
+  "larkCliPath": ""
+}
