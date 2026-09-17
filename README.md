@@ -59,7 +59,7 @@ The `allow` decision matters more than it looks: returning it from the hook make
 
 - **Node.js 18+** (uses only built-in modules — no `npm install`)
 - **Claude Code**
-- **[lark-cli](https://www.npmjs.com/package/@larksuite/cli)** installed and authorized: `npm i -g @larksuite/cli`, then `lark-cli auth login --domain im --no-wait --json`
+- **[lark-cli](https://www.npmjs.com/package/@larksuite/cli)** with a bound Feishu app and an authorized account (steps 2 below)
 - A Feishu / Lark account (the free personal tier is enough)
 
 ## Install
@@ -71,13 +71,19 @@ git clone https://github.com/<you>/claude-approval.git
 cd claude-approval
 ```
 
-**2. Authorize Feishu** (skip if already done)
+**2. Set up the Feishu CLI** (skip if you already use `lark-cli`)
 
 ```bash
+npm i -g @larksuite/cli
+lark-cli config init --new     # create and bind a Feishu app — follow the browser flow
 lark-cli auth login --domain im --no-wait --json
 ```
 
-Open the URL it prints, approve, then re-run the command without `--no-wait`.
+Open the URL it prints, approve, then re-run the last command without `--no-wait`.
+
+> **Why do I need an app?** Approval requests are sent *as a bot*, so the CLI needs a bound Feishu custom app that is allowed to send messages. `lark-cli config init --new` creates one and walks you through it.
+>
+> Doing it by hand instead: Feishu developer console → **创建企业自建应用** → enable the **bot** capability → add the *send messages* permission (`im:message`) → publish → `lark-cli config init --app-id <id> --app-secret-stdin`. Reading replies *as you* additionally needs `im:message:readonly`.
 
 **3. Generate your config**
 
@@ -208,7 +214,18 @@ AI 干活时经常停下来等人确认权限。人在电脑前点一下就行�
 
 ## 安装
 
-1. **装好 lark-cli 并授权**：`npm i -g @larksuite/cli`，然后 `lark-cli auth login --domain im --no-wait --json`，按提示在浏览器里完成授权
+1. **装好 lark-cli，并绑定一个飞书应用**：
+   ```bash
+   npm i -g @larksuite/cli
+   lark-cli config init --new     # 在浏览器里创建并绑定一个飞书应用
+   lark-cli auth login --domain im --no-wait --json
+   ```
+   打开它打印的链接完成授权，然后去掉 `--no-wait` 再跑一次最后那条命令。
+
+   > **为什么需要创建应用？** 审批消息是以「机器人身份」发出的，所以必须有一个已绑定、且被允许发消息的飞书自建应用。`lark-cli config init --new` 会帮你创建并引导开通权限。
+   >
+   > 想手工创建：飞书开发者后台 → 创建企业自建应用 → 开启「机器人」能力 → 添加「发送消息」权限（`im:message`）→ 发布 → `lark-cli config init --app-id <id> --app-secret-stdin`。你自己读取回复还需要 `im:message:readonly`。
+
 2. **生成配置**：`node toggle.cjs init` —— 会自动识别并填入你自己的飞书 open_id（只有你本人的回复算数）
 3. **注册钩子**：把下面这段加进 `~/.claude/settings.json` 的 `hooks` 字段，**路径改成你的实际位置**：
 
