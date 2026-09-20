@@ -9,6 +9,9 @@ const fs = require('fs');
 const path = require('path');
 const C = require('./lib/common.cjs');
 const F = require('./lib/feishu.cjs');
+const D = require('./lib/describe.cjs');
+const Card = require('./lib/card.cjs');
+const Buttons = require('./lib/button-daemon.cjs');
 
 // ---------------------------------------------------------------- 读取 stdin
 
@@ -101,18 +104,20 @@ async function main() {
   }
 
   // ------------------------------------------------------------ 发起审批
-  const existing = new Set(
-    (() => {
-      try {
-        return fs.readdirSync(C.DIRS.pending)
-          .filter((f) => f.endsWith('.json'))
-          .map((f) => f.replace(/\.json$/, ''));
-      } catch (_) { return []; }
-    })()
-  );
+  // 编号要避开「最近用过的」，不只是「当前待审批的」。
+  // 旧卡片上的按钮在令牌失效前仍可点击；编号一旦被回收，那次点击会被误配到新请求上。
+  const existing = new Set();
+  try {
+    for (const f of fs.readdirSync(C.DIRS.pending)) {
+      if (f.endsWith('.json')) existing.add(f.replace(/\.json$/, ''));
+    }
+  } catch (_) { /* 目录为空 */ }
+  C.recentDecisionIds().forEach((x) => existing.add(x));
+
   const id = C.genId(cfg, existing);
   const pendingFile = path.join(C.DIRS.pending, id + '.json');
   const inputPreview = C.truncate(JSON.stringify(toolInput), cfg.maxToolInputChars);
+  const desc = D.describe(toolName, toolInput); // 只算一次：消息、卡片、决策后的卡片都用它
 
   const pending = {
     id,
@@ -124,17 +129,39 @@ async function main() {
     created_at: Date.now(),
     decision: null,
     last_clarify_at: 0,
+    desc, // 决策后由按钮守护进程读取，用来重建卡片
   };
   C.writeJsonAtomic(pendingFile, pending);
 
-  const msgText = C.buildApprovalMessage(cfg, id, toolName, inputPreview);
+  const msgText = C.buildApprovalMessage(cfg, id, toolName, toolInput);
   const idemKey = ('apr-' + id + '-' + Date.now().toString(36)).slice(0, 50);
 
-  let sendRes = F.sendText(cfg, { toUserId: cfg.userOpenId, text: msgText, idempotencyKey: idemKey });
+  const sendTextNow = (k) => F.sendText(cfg, { toUserId: cfg.userOpenId, text: msgText, idempotencyKey: k });
+  const sendCardNow = (k) => F.sendCard(cfg, {
+    toUserId: cfg.userOpenId,
+    card: Card.buildApprovalCard(cfg, { id, toolName, toolInput, desc }),
+    idempotencyKey: k,
+  });
+
+  // 按钮通道可用才发卡片：守护进程没起来时发一张点不动的卡片只会让人困惑，
+  // 不如老老实实发文字。文字回复在任何情况下都是可用的。
+  //
+  // 心跳必须是「新鲜的」才算可用。只看「进程还在不在」不够：守护进程活着但长连接
+  // 断了没重连上时，卡片照样发得出去，你点了却没人接 —— 那正是最容易被误判成
+  // 「按钮坏了」的情况。宁可退回纯文字，因为文字回复在任何情况下都有效。
+  const ds = Buttons.daemonStatus();
+  const wantButtons = cfg.useCardButtons !== false && ds.running && ds.fresh;
+  let sendRes = wantButtons ? sendCardNow(idemKey) : sendTextNow(idemKey);
+
   if (!sendRes.ok) {
     await C.sleep(2000);
     // 同一个 idempotency-key：飞书 1 小时内不会重复发，重试是安全的
-    sendRes = F.sendText(cfg, { toUserId: cfg.userOpenId, text: msgText, idempotencyKey: idemKey });
+    sendRes = wantButtons ? sendCardNow(idemKey) : sendTextNow(idemKey);
+  }
+  if (!sendRes.ok && wantButtons) {
+    // 卡片发不出去（客户端太旧、卡片结构被拒等）→ 退回纯文字，别让请求石沉大海
+    C.log('卡片发送失败，退回纯文字：' + sendRes.error);
+    sendRes = sendTextNow(idemKey + '-t');
   }
   if (!sendRes.ok) {
     C.removeQuiet(pendingFile);
@@ -163,6 +190,21 @@ async function main() {
   const seen = new Set();
   let lastPollErr = '';
 
+  // 放行：写缓存（同样的操作短时间内不再打扰你）+ 告诉 Claude Code 跳过本地弹窗
+  const grantAndExit = (how) => {
+    C.writeJsonAtomic(cacheFile, {
+      tool_name: toolName,
+      key_hash: keyHash,
+      created_at: Date.now(),
+      expires_at: Date.now() + cfg.cacheTtlMin * 60000,
+      last_used: Date.now(),
+    });
+    C.removeQuiet(pendingFile);
+    C.log(how + ' ' + id + ' ' + toolName);
+    C.printDecision('allow', '用户已在手机上批准（审批编号 ' + id + '）。');
+    process.exit(0);
+  };
+
   while (true) {
     // 用户回家了 / 中途关掉开关 → 回落本地正常权限流程，不误拒绝
     if (!C.isAway()) {
@@ -178,6 +220,17 @@ async function main() {
         '等待手机审批超时（' + cfg.waitTimeoutSec + ' 秒内未收到回复），已自动拒绝该操作。' +
         (lastPollErr ? '（轮询异常：' + lastPollErr + '）' : '')
       );
+    }
+
+    // ---- 先看按钮有没有被点（本地小文件，比轮询飞书快，也不消耗飞书接口额度）----
+    // 决策文件由守护进程用「独占创建」写入，所以这里读到的一定是唯一那次点击。
+    const dec = C.readDecision(id);
+    if (dec) {
+      if (dec.decision === 'allow') grantAndExit('手机按钮批准');
+      C.removeQuiet(pendingFile);
+      C.log('手机按钮拒绝 ' + id + ' ' + toolName);
+      C.exitDeny('用户已在手机上点击「拒绝」该操作（审批编号 ' + id + '）。'
+        + '请勿重试相同操作，除非用户另有指示。');
     }
 
     const r = F.listMessages(cfg, { chatId, startIso, pageSize: 20 });
@@ -236,7 +289,7 @@ async function main() {
               .join('\n');
             F.sendText(cfg, {
               toUserId: cfg.userOpenId,
-              text: '当前有 ' + und.length + ' 个待审批请求，请带编号回复，例如：ok ' + oldest.id + '\n\n' + list,
+              text: '当前有 ' + und.length + ' 个待审批请求，请带编号回复，例如：1 ' + oldest.id + '\n\n' + list,
             });
           }
           continue;
@@ -249,19 +302,7 @@ async function main() {
       // 可能被后续多个审批请求重复消费，连续放行 TA 根本没看过的操作。
       if (!C.claimMessage(m.message_id)) continue;
 
-      if (parsed.allow) {
-        C.writeJsonAtomic(cacheFile, {
-          tool_name: toolName,
-          key_hash: keyHash,
-          created_at: Date.now(),
-          expires_at: Date.now() + cfg.cacheTtlMin * 60000,
-          last_used: Date.now(),
-        });
-        C.removeQuiet(pendingFile);
-        C.log('手机批准 ' + id + ' ' + toolName);
-        C.printDecision('allow', '用户已在手机上批准（审批编号 ' + id + '）。');
-        process.exit(0);
-      }
+      if (parsed.allow) grantAndExit('手机批准');
 
       C.removeQuiet(pendingFile);
       C.log('手机拒绝 ' + id + ' ' + toolName);
